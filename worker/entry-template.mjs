@@ -3,6 +3,7 @@ const JSON_HEADERS = { "content-type": "application/json; charset=utf-8", "cache
 const EVENT_TERMS = ["행사", "축제", "운영", "홍보", "광고", "콘텐츠", "영상", "제작", "문화", "캠페인", "전시", "공연", "포럼", "컨퍼런스", "박람회", "마라톤", "스포츠", "미디어"];
 const NOTICE_TERMS = /(지원|공모|모집|행사|입찰|용역|콘텐츠|마케팅|홍보|영상|축제|협력|선정|문화|미디어)/;
 const response = (data, status=200) => new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
+const privateResponse = (data, status=200) => new Response(JSON.stringify(data), { status, headers: {"content-type":"application/json; charset=utf-8","cache-control":"no-store"} });
 const xmlText = (s="") => s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,"$1").replace(/<[^>]*>/g," ").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/\s+/g," ").trim();
 const tag = (block, name) => xmlText(block.match(new RegExp(`<${name}[^>]*>([\\s\\S]*?)<\\/${name}>`,"i"))?.[1] || "");
 function dateOnly(value) {
@@ -145,10 +146,93 @@ async function getCultureRss(feed="notice") {
   }).filter(Boolean).slice(0,30);
   return response({ok:true,source:"문화체육관광부 RSS",updatedAt:new Date().toISOString(),count:items.length,items});
 }
+
+function safeCustomEndpoint(raw) {
+  let u;
+  try { u=new URL(raw); } catch { return null; }
+  const host=u.hostname.toLowerCase();
+  if (u.protocol!=="https:" || u.username || u.password || (u.port && u.port!=="443")) return null;
+  if (!(host==="go.kr" || host.endsWith(".go.kr"))) return null;
+  if (host==="localhost" || host.endsWith(".localhost") || /^\d+(\.\d+){3}$/.test(host) || host.includes(":")) return null;
+  for (const key of [...u.searchParams.keys()]) if (/^(servicekey|crtfcKey|api[_-]?key|access[_-]?token|token)$/i.test(key)) return null;
+  return u;
+}
+function xmlBlockValue(block,names) {
+  for (const name of names) {
+    const match=block.match(new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${name}>`,`i`));
+    if (match) return xmlText(match[1]);
+  }
+  return "";
+}
+function recordsAt(payload,path="") {
+  let value=payload;
+  if (path.trim()) for (const part of path.trim().split(".")) value=value?.[part];
+  else value=payload?.items??payload?.data?.items??payload?.data?.item??payload?.data??payload?.response?.body?.items?.item??payload?.response?.body?.items??payload?.response?.body?.item??payload?.jsonArray??payload?.results??payload?.item??payload;
+  if (value?.item!==undefined && !Array.isArray(value)) value=value.item;
+  if (!Array.isArray(value)) value=value&&typeof value==="object"?[value]:[];
+  return value;
+}
+function mapCustomRecord(row,index,name) {
+  const pick=(...keys)=>{for(const key of keys){const value=row?.[key];if(value!==undefined&&value!==null&&String(value).trim())return String(value).trim()}return ""};
+  const title=pick("title","pblancNm","pblancName","bidNtceNm","nttSj","subject","name","bizNm","eventNm");
+  if (!title) return null;
+  const link=pick("link","url","pblancUrl","bidNtceDtlUrl","detailUrl","originUrl","homepageUrl");
+  const rawDate=pick("pubDate","start","startDate","registDe","creatPnttm","createdAt","ntceDt","bidNtceDt");
+  const parsedDate=rawDate?new Date(rawDate):null;
+  const date=parsedDate&&!Number.isNaN(parsedDate.valueOf())?parsedDate.toISOString().slice(0,10):new Date().toISOString().slice(0,10);
+  const period=pick("deadline","endDate","reqstDt","reqstBeginEndDe","rceptEndDt","bidClseDt","closeDate","applyEnd");
+  const endMatch=period.match(/(20\d{2})[-./ ]?(\d{2})[-./ ]?(\d{2})/g)?.at(-1);
+  const deadline=endMatch?dateOnly(endMatch):null;
+  return {id:`custom-${name}-${pick("id","seq","pblancId","eventInfoId")||index}`,title,org:pick("org","author","jrsdInsttNm","excInsttNm","agency","organNm")||name,source:name,field:pick("field","category","lcategory","supportField")||"공공사업",kind:pick("kind","type","eventType","businessType")||"지원·공모",deadline,start:date,budget:pick("budget","amount","supportBudget")||"공고 원문 확인",match:70,open:!deadline||new Date(deadline+"T23:59:59")>=new Date(),link:link.startsWith("https://")?link:"https://www.go.kr/",description:cleanHtml(pick("description","bsnsSumryCn","summary","content","contents","overview")),requirements:cleanHtml(pick("requirements","target","trgetNm","eligibility"))||"지원 자격·신청기간·제출 서류는 원문에서 확인하세요.",idea:"공고의 지원대상과 사업 목적을 검토한 뒤 당사 사업과 연결할 수 있는지 확인합니다.",demo:false,live:true};
+}
+function mapCustomXmlRecord(block,index,name) {
+  const row={title:xmlBlockValue(block,["title","pblancNm","bidNtceNm","nttSj"]),link:xmlBlockValue(block,["link","url","pblancUrl","bidNtceDtlUrl"]),description:xmlBlockValue(block,["description","summary","bsnsSumryCn","content"]),pubDate:xmlBlockValue(block,["pubDate","registDe","createdAt","ntceDt"]),deadline:xmlBlockValue(block,["deadline","endDate","reqstDt","rceptEndDt"]),author:xmlBlockValue(block,["author","org","agency"]),category:xmlBlockValue(block,["category","lcategory"]),id:xmlBlockValue(block,["id","seq","pblancId"])};
+  return mapCustomRecord(row,index,name);
+}
+async function collectCustomSource(request) {
+  try {
+    const raw=await request.text();
+    if (raw.length>12000) return privateResponse({ok:false,error:"요청 크기가 너무 큽니다."},413);
+    const input=JSON.parse(raw||"{}");
+    const name=String(input.name||"").trim().slice(0,80),kind=input.kind==="rss"||input.kind==="xml"?input.kind:"json";
+    const endpoint=safeCustomEndpoint(String(input.url||""));
+    if (!name || !endpoint) return privateResponse({ok:false,error:"공공기관 HTTPS API/RSS 주소만 연결할 수 있습니다."},400);
+    const authMode=input.authMode==="query"||input.authMode==="header"?input.authMode:"none";
+    const authName=String(input.authName|| (authMode==="query"?"crtfcKey":"Authorization")).trim().slice(0,100);
+    const apiKey=String(input.apiKey||"").trim().slice(0,2000);
+    if (authMode!=="none" && (!authName || !apiKey)) return privateResponse({ok:false,error:"인증 방식과 키 값을 확인해 주세요."},400);
+    if (authMode==="query" && !/^[A-Za-z0-9_.~-]{1,100}$/.test(authName)) return privateResponse({ok:false,error:"인증 파라미터 이름을 확인해 주세요."},400);
+    if (authMode==="header" && (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/.test(authName) || /^(host|cookie|set-cookie|content-length|connection|transfer-encoding)$/i.test(authName))) return privateResponse({ok:false,error:"인증 헤더 이름을 확인해 주세요."},400);
+    const target=new URL(endpoint);
+    const headers=new Headers({accept:kind==="json"?"application/json, application/*+json":"application/rss+xml, application/atom+xml, application/xml, text/xml"});
+    if (authMode==="query") target.searchParams.set(authName,apiKey);
+    if (authMode==="header") headers.set(authName,apiKey);
+    let upstream;
+    try { upstream=await fetch(target.toString(),{method:"GET",headers,signal:AbortSignal.timeout(12000),cache:"no-store",redirect:"manual"}); }
+    catch { return privateResponse({ok:false,error:"출처 API에 연결하지 못했습니다."},502); }
+    if (upstream.status>=300 && upstream.status<400) return privateResponse({ok:false,error:"출처 주소가 다른 주소로 이동해 수집을 중단했습니다. 최종 HTTPS API 주소를 입력해 주세요."},502);
+    if (!upstream.ok) return privateResponse({ok:false,error:`출처 API 응답 오류 (${upstream.status}).`},502);
+    const body=await upstream.text();
+    if (body.length>2_000_000) return privateResponse({ok:false,error:"응답이 너무 커서 수집을 중단했습니다."},502);
+    let items=[];
+    if (kind==="json") {
+      let payload;
+      try { payload=JSON.parse(body); } catch { return privateResponse({ok:false,error:"JSON 응답을 확인하지 못했습니다. API 형식을 확인해 주세요."},502); }
+      items=recordsAt(payload,String(input.itemsPath||"")).map((row,i)=>mapCustomRecord(row,i,name)).filter(Boolean);
+    } else {
+      const blocks=[...body.matchAll(/<(?:item|entry)\b[^>]*>([\s\S]*?)<\/(?:item|entry)>/gi)].map(match=>match[1]);
+      items=blocks.map((block,i)=>mapCustomXmlRecord(block,i,name)).filter(Boolean);
+    }
+    return privateResponse({ok:true,source:name,updatedAt:new Date().toISOString(),count:items.length,items:items.slice(0,100)});
+  } catch {
+    return privateResponse({ok:false,error:"출처 설정 또는 응답 형식을 확인해 주세요."},400);
+  }
+}
 export default {
   async fetch(request, env) {
     const url=new URL(request.url);
-    if (request.method!=="GET") return new Response("Method not allowed",{status:405,headers:{allow:"GET"}});
+    if (request.method==="POST" && url.pathname==="/api/custom-source") return collectCustomSource(request);
+    if (request.method!=="GET") return new Response("Method not allowed",{status:405,headers:{allow:"GET, POST"}});
     if (url.pathname==="/api/g2b") return getG2B(env);
     if (url.pathname==="/api/customs-trade") return getCustomsTrade(env,url);
     if (url.pathname==="/api/bizinfo/support") return getBizinfo(env,"support");
