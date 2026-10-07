@@ -50,6 +50,37 @@ async function getG2B(env) {
   return response({ok:true,source:"나라장터",updatedAt:new Date().toISOString(),count:items.length,items});
 }
 
+function recentTradeMonths() {
+  const now = new Date(Date.now()+9*60*60*1000);
+  const current = new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),1));
+  const end = new Date(current.getTime()-86400000);
+  const start = new Date(Date.UTC(end.getUTCFullYear(),end.getUTCMonth()-2,1));
+  const ym = d => `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,"0")}`;
+  return {start:ym(start),end:ym(end)};
+}
+async function getCustomsTrade(env, requestUrl) {
+  if (!env.CUSTOMS_SERVICE_KEY) return response({ok:false,source:"관세청",error:"관세청 API 키가 서버에 설정되지 않았습니다.",items:[]},503);
+  const country=(requestUrl.searchParams.get("country")||"US").toUpperCase();
+  const hs=requestUrl.searchParams.get("hs")||"";
+  if (!/^[A-Z]{2}$/.test(country) || (hs && !/^\d{2,10}$/.test(hs))) return response({ok:false,source:"관세청",error:"국가코드 또는 HS 품목코드 형식을 확인해 주세요.",items:[]},400);
+  const {start,end}=recentTradeMonths();
+  const u=new URL("https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList");
+  for (const [k,v] of Object.entries({serviceKey:env.CUSTOMS_SERVICE_KEY,strtYymm:start,endYymm:end,cntyCd:country})) u.searchParams.set(k,v);
+  if (hs) u.searchParams.set("hsSgn",hs);
+  let upstream;
+  try { upstream=await fetch(u.toString(),{headers:{accept:"application/xml, text/xml"},cf:{cacheTtl:3600,cacheEverything:true}}); }
+  catch { return response({ok:false,source:"관세청",error:"관세청 API에 연결하지 못했습니다.",items:[]},502); }
+  if (!upstream.ok) return response({ok:false,source:"관세청",error:`관세청 API 응답 오류 (${upstream.status}).`,items:[]},502);
+  const text=await upstream.text();
+  const code=tag(text,"resultCode"), message=tag(text,"resultMsg");
+  if (code && code!=="00" && code!=="0") return response({ok:false,source:"관세청",error:`관세청 API 코드 ${code}: ${message||"요청 실패"}`,items:[]},502);
+  const rows=[...text.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)].map(m=>m[1]).map(row=>({
+    month:tag(row,"year"),country:tag(row,"statCdCntnKor1"),countryCode:tag(row,"statCd"),product:tag(row,"statKor"),hsCode:tag(row,"hsCd"),
+    exportWeight:tag(row,"expWgt"),exportUsd:tag(row,"expDlr"),importWeight:tag(row,"impWgt"),importUsd:tag(row,"impDlr"),balanceUsd:tag(row,"balPayments")
+  }));
+  return response({ok:true,source:"관세청 품목별 국가별 수출입실적",updatedAt:new Date().toISOString(),country,count:rows.length,statistics:rows,items:[]});
+}
+
 function bizinfoRows(payload) {
   const root=payload?.jsonArray||payload?.response||payload;
   let rows=root?.item||root?.items||[];
@@ -98,17 +129,19 @@ async function getBizinfo(env, kind) {
   const items=bizinfoRows(payload).map(mapper).filter(Boolean).filter(item=>item.open).slice(0,80);
   return response({ok:true,source:kind,updatedAt:new Date().toISOString(),count:items.length,items});
 }
-async function getCultureRss() {
+async function getCultureRss(feed="notice") {
+  const endpoint=feed==="press"?"https://www.mcst.go.kr/common/rss/press.jsp":"https://www.mcst.go.kr/common/rss/notice.jsp";
+  const source=feed==="press"?"문화체육관광부 보도자료 RSS":"문화체육관광부 공지 RSS";
   let upstream;
-  try { upstream=await fetch("https://www.mcst.go.kr/common/rss/notice.jsp",{headers:{accept:"application/rss+xml, application/xml, text/xml"},cf:{cacheTtl:600,cacheEverything:true}}); }
-  catch { return response({ok:false,source:"문화체육관광부 RSS",error:"문체부 RSS에 연결하지 못했습니다.",items:[]},502); }
-  if (!upstream.ok) return response({ok:false,source:"문화체육관광부 RSS",error:`문체부 RSS 응답 오류 (${upstream.status}).`,items:[]},502);
+  try { upstream=await fetch(endpoint,{headers:{accept:"application/rss+xml, application/xml, text/xml"},cf:{cacheTtl:600,cacheEverything:true}}); }
+  catch { return response({ok:false,source,error:"문체부 RSS에 연결하지 못했습니다.",items:[]},502); }
+  if (!upstream.ok) return response({ok:false,source,error:`문체부 RSS 응답 오류 (${upstream.status}).`,items:[]},502);
   const text=await upstream.text();
   const items=[...text.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)].map((m,i)=>{
     const b=m[1], title=tag(b,"title"), link=tag(b,"link"), description=tag(b,"description"), pubDate=tag(b,"pubDate");
-    if (!title || !NOTICE_TERMS.test(title)) return null;
+    if (!title || (feed!=="press"&&!NOTICE_TERMS.test(title))) return null;
     const date=pubDate ? new Date(pubDate) : null;
-    return {id:`mcst-${link||i}`,title,org:"문화체육관광부",source:"문화·지역기관",field:/행사|축제|공연|전시|관광/.test(title)?"행사·축제":"콘텐츠·미디어",kind:"공고·정책 알림",deadline:null,start:date&&!Number.isNaN(date.valueOf())?date.toISOString().slice(0,10):new Date().toISOString().slice(0,10),budget:"원문 확인",match:76,open:true,link:link||"https://www.mcst.go.kr/",description:description||"문체부 RSS에서 수집한 공지입니다. 모집 기간·지원 자격은 원문에서 확인하세요.",requirements:"RSS에는 마감일과 세부 자격이 포함되지 않을 수 있습니다. 공고 원문과 첨부파일을 확인하세요.",idea:"공고 성격을 확인한 뒤 문화·관광·콘텐츠 행사 또는 제작 제안으로 연결 가능한지 검토합니다.",demo:false,live:true};
+    return {id:`mcst-${feed}-${link||i}`,title,org:"문화체육관광부",source:feed==="press"?"문화체육관광부 보도자료":"문화·지역기관",field:/행사|축제|공연|전시|관광/.test(title)?"행사·축제":"콘텐츠·미디어",kind:feed==="press"?"정책 보도자료":"공고·정책 알림",deadline:null,start:date&&!Number.isNaN(date.valueOf())?date.toISOString().slice(0,10):new Date().toISOString().slice(0,10),budget:"원문 확인",match:76,open:true,link:link||"https://www.mcst.go.kr/",description:description||"문체부 RSS에서 수집한 게시물입니다. 지원 자격과 모집 기간은 원문에서 확인하세요.",requirements:"RSS에는 마감일과 세부 자격이 포함되지 않을 수 있습니다. 공고 원문과 첨부파일을 확인하세요.",idea:"문화·관광·콘텐츠 정책 또는 행사와 사업 기회를 원문에서 확인합니다.",demo:false,live:true};
   }).filter(Boolean).slice(0,30);
   return response({ok:true,source:"문화체육관광부 RSS",updatedAt:new Date().toISOString(),count:items.length,items});
 }
@@ -117,9 +150,11 @@ export default {
     const url=new URL(request.url);
     if (request.method!=="GET") return new Response("Method not allowed",{status:405,headers:{allow:"GET"}});
     if (url.pathname==="/api/g2b") return getG2B(env);
+    if (url.pathname==="/api/customs-trade") return getCustomsTrade(env,url);
     if (url.pathname==="/api/bizinfo/support") return getBizinfo(env,"support");
     if (url.pathname==="/api/bizinfo/events") return getBizinfo(env,"event");
-    if (url.pathname==="/api/mcst-rss") return getCultureRss();
+    if (url.pathname==="/api/mcst-rss") return getCultureRss("notice");
+    if (url.pathname==="/api/mcst-press-rss") return getCultureRss("press");
     if (url.pathname!=="/") return new Response("Not found",{status:404});
     return new Response(page,{headers:{"content-type":"text/html; charset=utf-8","x-content-type-options":"nosniff","referrer-policy":"strict-origin-when-cross-origin"}});
   },

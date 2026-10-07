@@ -36,15 +36,18 @@ npm run validate
 | 이름 | 용도 |
 | --- | --- |
 | `G2B_SERVICE_KEY` | 조달청 나라장터 입찰공고 API |
+| `CUSTOMS_SERVICE_KEY` | 관세청 품목별 국가별 수출입실적 API |
 | `BIZINFO_SUPPORT_KEY` | 기업마당 지원사업 피드 |
 | `BIZINFO_EVENT_KEY` | 기업마당 행사정보 피드 |
 
-키를 등록한 뒤 다시 배포하면 공고 화면의 **새 공고 수집** 버튼이 서버 API를 호출합니다. 키가 없는 출처는 연결 실패로 표시됩니다. 문체부 RSS는 키 없이 서버에서 가져옵니다.
+키를 등록한 뒤 다시 배포하면 공고 화면의 **새 공고 수집** 버튼이 서버 API를 호출합니다. 키가 없는 출처는 연결 실패로 표시됩니다. 문체부 공지·보도자료 RSS는 키 없이 서버에서 가져옵니다. 관세청 통계의 기본 국가는 미국(US)이며 필요하면 `/api/customs-trade?country=KR&hs=XXXX` 형식으로 국가와 HS 코드를 지정할 수 있습니다.
 
 ## API 경로
 
 - `GET /api/g2b`
+- `GET /api/customs-trade`
 - `GET /api/mcst-rss`
+- `GET /api/mcst-press-rss`
 - `GET /api/bizinfo/support`
 - `GET /api/bizinfo/events`
 
