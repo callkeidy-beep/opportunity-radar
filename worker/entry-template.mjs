@@ -228,12 +228,31 @@ async function collectCustomSource(request) {
     return privateResponse({ok:false,error:"출처 설정 또는 응답 형식을 확인해 주세요."},400);
   }
 }
+async function getMsit(env) {
+  if (!env.DATA_GO_KR_SERVICE_KEY) return response({ok:false,error:"공공데이터 인증키가 서버에 설정되지 않았습니다.",items:[]},503);
+  const endpoint=new URL("https://apis.data.go.kr/1721000/msitannouncementinfo/businessAnnouncMentList");
+  for(const [key,value] of Object.entries({ServiceKey:env.DATA_GO_KR_SERVICE_KEY,pageNo:"1",numOfRows:"30",returnType:"json"})) endpoint.searchParams.set(key,value);
+  try {
+    const upstream=await fetch(endpoint,{signal:AbortSignal.timeout(10000),redirect:"error"});
+    if(!upstream.ok) return response({ok:false,error:`과기정통부 API 응답 오류 (${upstream.status})`,items:[]},502);
+    const text=await upstream.text();
+    let payload;
+    try { payload=JSON.parse(text); } catch { return response({ok:false,error:"과기정통부 API 응답 형식 또는 인증 상태를 확인해 주세요.",items:[]},502); }
+    const header=payload?.response?.header;
+    if(header && !["00","0"].includes(String(header.resultCode))) return response({ok:false,error:`과기정통부 API 코드 ${header.resultCode}: ${cleanHtml(header.resultMsg||"요청 실패")}`,items:[]},502);
+    const rows=recordsAt(payload);
+    const items=rows.map((row,index)=>mapCustomRecord({...row,title:row.subject,link:row.viewUrl,pubDate:row.pressDt,org:row.deptName},index,"과학기술정보통신부 사업공고")).filter(Boolean);
+    if(!header && !items.length) return response({ok:false,error:"과기정통부 API 응답 항목을 확인하지 못했습니다.",items:[]},502);
+    return response({ok:true,source:"과기정통부",count:items.length,items,updatedAt:new Date().toISOString()});
+  } catch { return response({ok:false,error:"과기정통부 API 연결 실패 또는 응답 시간 초과",items:[]},502); }
+}
 export default {
   async fetch(request, env) {
     const url=new URL(request.url);
     if (request.method==="POST" && url.pathname==="/api/custom-source") return collectCustomSource(request);
     if (request.method!=="GET") return new Response("Method not allowed",{status:405,headers:{allow:"GET, POST"}});
     if (url.pathname==="/api/g2b") return getG2B(env);
+    if (url.pathname==="/api/msit") return getMsit(env);
     if (url.pathname==="/api/customs-trade") return getCustomsTrade(env,url);
     if (url.pathname==="/api/bizinfo/support") return getBizinfo(env,"support");
     if (url.pathname==="/api/bizinfo/events") return getBizinfo(env,"event");
