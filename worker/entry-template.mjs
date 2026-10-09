@@ -228,6 +228,32 @@ async function collectCustomSource(request) {
     return privateResponse({ok:false,error:"출처 설정 또는 응답 형식을 확인해 주세요."},400);
   }
 }
+async function getKstartup(env) {
+  if (!env.DATA_GO_KR_SERVICE_KEY) return response({ok:false,error:"공공데이터 인증키가 서버에 설정되지 않았습니다.",items:[]},503);
+  const endpoint=new URL("https://apis.data.go.kr/B552735/kisedKstartupService01/getAnnouncementInformation01");
+  for(const [key,value] of Object.entries({ServiceKey:env.DATA_GO_KR_SERVICE_KEY,page:"1",perPage:"100",returnType:"json"})) endpoint.searchParams.set(key,value);
+  try {
+    const upstream=await fetch(endpoint,{signal:AbortSignal.timeout(10000),redirect:"error"});
+    if(!upstream.ok) return response({ok:false,error:`K-Startup API 응답 오류 (${upstream.status})`,items:[]},502);
+    const text=await upstream.text();
+    let payload;
+    try { payload=JSON.parse(text); } catch {
+      const code=tag(text,"returnReasonCode")||tag(text,"resultCode");
+      return response({ok:false,error:code?`K-Startup 인증·서비스 오류 (${code})`:"K-Startup JSON 응답 형식을 확인해 주세요.",items:[]},502);
+    }
+    const rows=recordsAt(payload);
+    if(!Array.isArray(payload?.data)&&!Array.isArray(payload?.items)&&!payload?.response&&!Array.isArray(payload)) return response({ok:false,error:"K-Startup 응답 항목 또는 인증 상태를 확인해 주세요.",items:[]},502);
+    const items=rows.map((row,index)=>{
+      const title=cleanHtml(row.biz_pbanc_nm||"");if(!title)return null;
+      let link=String(row.detl_pg_url||"").trim();if(link.startsWith("www.k-startup.go.kr/"))link="https://"+link;
+      const item=mapCustomRecord({title,link,id:row.pbanc_sn||link||title,start:dateOnly(row.pbanc_rcpt_bgng_dt),deadline:dateOnly(row.pbanc_rcpt_end_dt),org:row.pbanc_ntrp_nm||row.sprv_inst,description:row.pbanc_ctnt,requirements:row.aply_trgt_ctnt||row.aply_trgt},index,"K-Startup");
+      const fieldText=String(row.supt_biz_clsfc||"");
+      const flag=String(row.rcrt_prgs_yn||row.Rcrt_prgs_yn||"").toUpperCase();
+      return {...item,id:"kstartup-"+encodeURIComponent(String(row.pbanc_sn||link||title)),field:/행사|네트워/.test(fieldText)?"행사·축제":/기술|R&D/.test(fieldText)?"기술·R&D":"창업·경영",kind:"창업지원",open:flag==="N"?false:item.open};
+    }).filter(Boolean);
+    return response({ok:true,source:"K-Startup",count:items.length,items,updatedAt:new Date().toISOString()});
+  } catch { return response({ok:false,error:"K-Startup API 연결 실패 또는 응답 시간 초과",items:[]},502); }
+}
 async function getMsit(env) {
   if (!env.DATA_GO_KR_SERVICE_KEY) return response({ok:false,error:"공공데이터 인증키가 서버에 설정되지 않았습니다.",items:[]},503);
   const endpoint=new URL("https://apis.data.go.kr/1721000/msitannouncementinfo/businessAnnouncMentList");
@@ -255,6 +281,7 @@ export default {
     if (request.method!=="GET") return new Response("Method not allowed",{status:405,headers:{allow:"GET, POST"}});
     if (url.pathname==="/api/g2b") return getG2B(env);
     if (url.pathname==="/api/msit") return getMsit(env);
+    if (url.pathname==="/api/kstartup") return getKstartup(env);
     if (url.pathname==="/api/customs-trade") return getCustomsTrade(env,url);
     if (url.pathname==="/api/bizinfo/support") return getBizinfo(env,"support");
     if (url.pathname==="/api/bizinfo/events") return getBizinfo(env,"event");
