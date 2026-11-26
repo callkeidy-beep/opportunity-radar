@@ -2,7 +2,7 @@ const page = __PAGE_JSON__;
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "public, s-maxage=300, stale-while-revalidate=600" };
 const EVENT_TERMS = ["행사", "축제", "운영", "홍보", "광고", "콘텐츠", "영상", "제작", "문화", "캠페인", "전시", "공연", "포럼", "컨퍼런스", "박람회", "마라톤", "스포츠", "미디어"];
 const NOTICE_TERMS = /(지원|공모|모집|행사|입찰|용역|콘텐츠|마케팅|홍보|영상|축제|협력|선정|문화|미디어)/;
-const response = (data, status=200) => new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
+const response = (data, status=200) => new Response(JSON.stringify(data), { status, headers: status>=400||data?.ok===false ? {"content-type":"application/json; charset=utf-8","cache-control":"no-store"} : JSON_HEADERS });
 const privateResponse = (data, status=200) => new Response(JSON.stringify(data), { status, headers: {"content-type":"application/json; charset=utf-8","cache-control":"no-store"} });
 const xmlText = (s="") => s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,"$1").replace(/<[^>]*>/g," ").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/\s+/g," ").trim();
 const tag = (block, name) => xmlText(block.match(new RegExp(`<${name}[^>]*>([\\s\\S]*?)<\\/${name}>`,"i"))?.[1] || "");
@@ -16,14 +16,22 @@ function currentKstWindow() {
   const start = new Date(kstNow.getTime()-14*24*60*60*1000).toISOString().slice(0,10).replaceAll("-","");
   return { begin:`${start}0000`, end:`${end}2359` };
 }
+async function readJsonOrApiError(upstream,label) {
+  const text=await upstream.text();
+  try { return {payload:JSON.parse(text)}; } catch {}
+  const code=tag(text,"returnReasonCode")||tag(text,"resultCode");
+  const msg=tag(text,"returnAuthMsg")||tag(text,"resultMsg")||tag(text,"errMsg");
+  if (code||msg) return {error:`${label} 인증·서비스 오류 ${code||""} ${msg||""}`.replace(/\s+/g," ").trim()};
+  if (/<html/i.test(text)) return {error:`${label}가 JSON 대신 HTML 페이지를 돌려줬습니다. 차단·점검·주소 변경 여부를 확인하세요.`};
+  return {error:`${label} 응답 형식을 확인할 수 없습니다.`};
+}
 function toG2BItem(x) {
   const title=String(x.bidNtceNm||x.bidNtceNmEng||"").replace(/<[^>]*>/g,"").trim();
   if (!title || !EVENT_TERMS.some(term=>title.includes(term))) return null;
   const close=dateOnly(x.bidClseDt||x.bidClseDtFmt);
-  const now=new Date(new Date().toLocaleString("en-US",{timeZone:"Asia/Seoul"}));
-  if (close && new Date(close+"T23:59:59")<now) return null;
+  if (close && new Date(close+"T23:59:59+09:00")<new Date()) return null;
   const id=`g2b-${x.bidNtceNo||title}-${x.bidNtceOrd||"0"}`;
-  const date=dateOnly(x.ntceDt||x.bidNtceDt||x.bidNtceRegDt) || new Date().toISOString().slice(0,10);
+  const date=dateOnly(x.ntceDt||x.bidNtceDt||x.bidNtceRegDt) || null;
   const amount=Number(x.asignBdgtAmt||x.presmptPrce||0);
   const budget=amount ? `${new Intl.NumberFormat("ko-KR").format(amount)}원` : "공고 원문 확인";
   const org=x.ntceInsttNm||x.dminsttNm||"나라장터 공고기관";
@@ -37,15 +45,16 @@ async function getG2B(env) {
   const u=new URL("https://apis.data.go.kr/1230000/ad/BidPublicInfoService/getBidPblancListInfoServc");
   for (const [k,v] of Object.entries({ServiceKey:env.G2B_SERVICE_KEY,type:"json",inqryDiv:"1",inqryBgnDt:begin,inqryEndDt:end,pageNo:"1",numOfRows:"100"})) u.searchParams.set(k,v);
   let upstream;
-  try { upstream=await fetch(u.toString(),{headers:{accept:"application/json"},cf:{cacheTtl:300,cacheEverything:true}}); }
+  try { upstream=await fetch(u.toString(),{headers:{accept:"application/json"},cf:{cacheTtl:300,cacheEverything:true},signal:AbortSignal.timeout(10000)}); }
   catch { return response({ok:false,source:"나라장터",error:"조달청 API에 연결하지 못했습니다.",items:[]},502); }
-  if (!upstream.ok) return response({ok:false,source:"나라장터",error:`조달청 API 응답 오류 (${upstream.status}).`,items:[]},502);
-  let payload;
-  try { payload=await upstream.json(); } catch { return response({ok:false,source:"나라장터",error:"API 응답 형식을 확인할 수 없습니다.",items:[]},502); }
+  if (!upstream.ok) return response({ok:false,source:"나라장터",layer:"upstream",upstreamStatus:upstream.status,error:`조달청 API 응답 오류 (${upstream.status}).`,items:[]},502);
+  const parsed=await readJsonOrApiError(upstream,"조달청 API");
+  if (parsed.error) return response({ok:false,source:"나라장터",layer:"upstream",error:parsed.error,items:[]},502);
+  const payload=parsed.payload;
   const head=payload?.response?.header;
   const body=payload?.response?.body;
   if (head && !["00","0"].includes(String(head.resultCode))) return response({ok:false,source:"나라장터",error:`조달청 API 코드 ${head.resultCode||"확인 불가"}: ${head.resultMsg||"요청 실패"}`,items:[]},502);
-  let rows=body?.items?.item||[];
+  let rows=Array.isArray(body?.items)?body.items:(body?.items?.item||[]);
   if (!Array.isArray(rows)) rows=rows?[rows]:[];
   const items=rows.map(toG2BItem).filter(Boolean).slice(0,60);
   return response({ok:true,source:"나라장터",updatedAt:new Date().toISOString(),count:items.length,items});
@@ -69,7 +78,7 @@ async function getCustomsTrade(env, requestUrl) {
   for (const [k,v] of Object.entries({serviceKey:env.CUSTOMS_SERVICE_KEY,strtYymm:start,endYymm:end,cntyCd:country})) u.searchParams.set(k,v);
   if (hs) u.searchParams.set("hsSgn",hs);
   let upstream;
-  try { upstream=await fetch(u.toString(),{headers:{accept:"application/xml, text/xml"},cf:{cacheTtl:3600,cacheEverything:true}}); }
+  try { upstream=await fetch(u.toString(),{headers:{accept:"application/xml, text/xml"},cf:{cacheTtl:3600,cacheEverything:true},signal:AbortSignal.timeout(10000)}); }
   catch { return response({ok:false,source:"관세청",error:"관세청 API에 연결하지 못했습니다.",items:[]},502); }
   if (!upstream.ok) return response({ok:false,source:"관세청",error:`관세청 API 응답 오류 (${upstream.status}).`,items:[]},502);
   const text=await upstream.text();
@@ -84,6 +93,7 @@ async function getCustomsTrade(env, requestUrl) {
 
 function bizinfoRows(payload) {
   const root=payload?.jsonArray||payload?.response||payload;
+  if (Array.isArray(root)) return root;
   let rows=root?.item||root?.items||[];
   if (!Array.isArray(rows)) rows=rows?[rows]:[];
   return rows;
@@ -100,14 +110,14 @@ function mapBizinfoSupport(row,i) {
   const period=row.reqstMthPapersCn||row.reqstBeginEndDe||row.reqstDt||"";
   const deadline=periodEnd(period);
   const id=row.seq||row.pblancId||`support-${i}`;
-  return {id:`bizinfo-${id}`,title,org:row.author||row.jrsdInsttNm||row.excInsttNm||"기업마당 공고기관",source:"기업마당",field:row.lcategory||row.pldirSportRealmLclasCodeNm||"창업·경영",kind:"지원사업",deadline,start:dateOnly(row.pubDate||row.creatPnttm)||new Date().toISOString().slice(0,10),budget:"공고 원문 확인",match:84,open:!deadline||new Date(deadline+"T23:59:59")>=new Date(),link:row.pblancUrl||row.link||row.pblancUrl||"https://www.bizinfo.go.kr/",description:cleanHtml(row.bsnsSumryCn||row.description||"기업마당 지원사업 API에서 수집했습니다."),requirements:`지원 대상: ${row.trgetNm||"원문 확인"}. 신청기간과 제출서류는 원문에서 확인하세요.`,idea:"사업 목적과 당사 콘텐츠·행사 역량을 대조한 뒤 제작·홍보·지역 행사 제안으로 연결합니다.",demo:false,live:true};
+  return {id:`bizinfo-${id}`,title,org:row.author||row.jrsdInsttNm||row.excInsttNm||"기업마당 공고기관",source:"기업마당",field:row.lcategory||row.pldirSportRealmLclasCodeNm||"창업·경영",kind:"지원사업",deadline,start:dateOnly(row.pubDate||row.creatPnttm)||null,budget:"공고 원문 확인",match:84,open:!deadline||new Date(deadline+"T23:59:59+09:00")>=new Date(),link:row.pblancUrl||row.link||row.pblancUrl||"https://www.bizinfo.go.kr/",description:cleanHtml(row.bsnsSumryCn||row.description||"기업마당 지원사업 API에서 수집했습니다."),requirements:`지원 대상: ${row.trgetNm||"원문 확인"}. 신청기간과 제출서류는 원문에서 확인하세요.`,idea:"사업 목적과 당사 콘텐츠·행사 역량을 대조한 뒤 제작·홍보·지역 행사 제안으로 연결합니다.",demo:false,live:true};
 }
 function mapBizinfoEvent(row,i) {
   const title=row.title||row.nttNm||"";
   if (!title) return null;
   const deadline=periodEnd(row.rceptPd||row.receptionPeriod||"");
   const id=row.seq||row.eventInfoId||`event-${i}`;
-  return {id:`bizinfo-event-${id}`,title,org:row.originOrg||row.originEngnNm||"행사 주관기관 원문 확인",source:"기업마당",field:row.lcategory||row.eventType||row.eventInfoTyNm||"행사·축제",kind:row.eventType||row.eventInfoTyNm||"행사정보",deadline,start:dateOnly(row.registDe||row.pubDate)||new Date().toISOString().slice(0,10),budget:"참가 조건 원문 확인",match:79,open:!deadline||new Date(deadline+"T23:59:59")>=new Date(),link:row.originUrl||row.originUrlAdres||row.bizinfoUrl||row.link||"https://www.bizinfo.go.kr/",description:cleanHtml(row.description||row.nttCn||"기업마당 행사정보 API에서 수집했습니다."),requirements:"참가 대상, 접수기간, 행사 일정과 비용을 원문에서 확인하세요.",idea:"포럼·세미나·전시 정보를 파트너 발굴과 콘텐츠 취재 기회로 검토합니다.",demo:false,live:true};
+  return {id:`bizinfo-event-${id}`,title,org:row.originOrg||row.originEngnNm||"행사 주관기관 원문 확인",source:"기업마당",field:row.lcategory||row.eventType||row.eventInfoTyNm||"행사·축제",kind:row.eventType||row.eventInfoTyNm||"행사정보",deadline,start:dateOnly(row.registDe||row.pubDate)||null,budget:"참가 조건 원문 확인",match:79,open:!deadline||new Date(deadline+"T23:59:59+09:00")>=new Date(),link:row.originUrl||row.originUrlAdres||row.bizinfoUrl||row.link||"https://www.bizinfo.go.kr/",description:cleanHtml(row.description||row.nttCn||"기업마당 행사정보 API에서 수집했습니다."),requirements:"참가 대상, 접수기간, 행사 일정과 비용을 원문에서 확인하세요.",idea:"포럼·세미나·전시 정보를 파트너 발굴과 콘텐츠 취재 기회로 검토합니다.",demo:false,live:true};
 }
 async function getBizinfo(env, kind) {
   const serviceKey=kind==="event"?env.BIZINFO_EVENT_KEY:env.BIZINFO_SUPPORT_KEY;
@@ -121,11 +131,12 @@ async function getBizinfo(env, kind) {
   u.searchParams.set("pageUnit","100");
   u.searchParams.set("pageIndex","1");
   let upstream;
-  try { upstream=await fetch(u.toString(),{headers:{accept:"application/json"},cf:{cacheTtl:300,cacheEverything:true}}); }
+  try { upstream=await fetch(u.toString(),{headers:{accept:"application/json"},cf:{cacheTtl:300,cacheEverything:true},signal:AbortSignal.timeout(10000)}); }
   catch { return response({ok:false,source:kind,error:"기업마당 API에 연결하지 못했습니다.",items:[]},502); }
-  if (!upstream.ok) return response({ok:false,source:kind,error:`기업마당 API 응답 오류 (${upstream.status}).`,items:[]},502);
-  let payload;
-  try { payload=await upstream.json(); } catch { return response({ok:false,source:kind,error:"기업마당 API 응답 형식을 확인할 수 없습니다.",items:[]},502); }
+  if (!upstream.ok) return response({ok:false,source:kind,layer:"upstream",upstreamStatus:upstream.status,error:`기업마당 API 응답 오류 (${upstream.status}).`,items:[]},502);
+  const parsed=await readJsonOrApiError(upstream,"기업마당 API");
+  if (parsed.error) return response({ok:false,source:kind,layer:"upstream",error:parsed.error,items:[]},502);
+  const payload=parsed.payload;
   const mapper=isEvent?mapBizinfoEvent:mapBizinfoSupport;
   const items=bizinfoRows(payload).map(mapper).filter(Boolean).filter(item=>item.open).slice(0,80);
   return response({ok:true,source:kind,updatedAt:new Date().toISOString(),count:items.length,items});
@@ -134,7 +145,7 @@ async function getCultureRss(feed="notice") {
   const endpoint=feed==="press"?"https://www.mcst.go.kr/common/rss/press.jsp":"https://www.mcst.go.kr/common/rss/notice.jsp";
   const source=feed==="press"?"문화체육관광부 보도자료 RSS":"문화체육관광부 공지 RSS";
   let upstream;
-  try { upstream=await fetch(endpoint,{headers:{accept:"application/rss+xml, application/xml, text/xml"},cf:{cacheTtl:600,cacheEverything:true}}); }
+  try { upstream=await fetch(endpoint,{headers:{accept:"application/rss+xml, application/xml, text/xml"},cf:{cacheTtl:600,cacheEverything:true},signal:AbortSignal.timeout(10000)}); }
   catch { return response({ok:false,source,error:"문체부 RSS에 연결하지 못했습니다.",items:[]},502); }
   if (!upstream.ok) return response({ok:false,source,error:`문체부 RSS 응답 오류 (${upstream.status}).`,items:[]},502);
   const text=await upstream.text();
@@ -142,7 +153,7 @@ async function getCultureRss(feed="notice") {
     const b=m[1], title=tag(b,"title"), link=tag(b,"link"), description=tag(b,"description"), pubDate=tag(b,"pubDate");
     if (!title || (feed!=="press"&&!NOTICE_TERMS.test(title))) return null;
     const date=pubDate ? new Date(pubDate) : null;
-    return {id:`mcst-${feed}-${link||i}`,title,org:"문화체육관광부",source:feed==="press"?"문화체육관광부 보도자료":"문화·지역기관",field:/행사|축제|공연|전시|관광/.test(title)?"행사·축제":"콘텐츠·미디어",kind:feed==="press"?"정책 보도자료":"공고·정책 알림",deadline:null,start:date&&!Number.isNaN(date.valueOf())?date.toISOString().slice(0,10):new Date().toISOString().slice(0,10),budget:"원문 확인",match:76,open:true,link:link||"https://www.mcst.go.kr/",description:description||"문체부 RSS에서 수집한 게시물입니다. 지원 자격과 모집 기간은 원문에서 확인하세요.",requirements:"RSS에는 마감일과 세부 자격이 포함되지 않을 수 있습니다. 공고 원문과 첨부파일을 확인하세요.",idea:"문화·관광·콘텐츠 정책 또는 행사와 사업 기회를 원문에서 확인합니다.",demo:false,live:true};
+    return {id:`mcst-${feed}-${link||i}`,title,org:"문화체육관광부",source:feed==="press"?"문화체육관광부 보도자료":"문화·지역기관",field:/행사|축제|공연|전시|관광/.test(title)?"행사·축제":"콘텐츠·미디어",kind:feed==="press"?"정책 보도자료":"공고·정책 알림",deadline:null,start:date&&!Number.isNaN(date.valueOf())?date.toISOString().slice(0,10):null,budget:"원문 확인",match:76,open:true,link:link||"https://www.mcst.go.kr/",description:description||"문체부 RSS에서 수집한 게시물입니다. 지원 자격과 모집 기간은 원문에서 확인하세요.",requirements:"RSS에는 마감일과 세부 자격이 포함되지 않을 수 있습니다. 공고 원문과 첨부파일을 확인하세요.",idea:"문화·관광·콘텐츠 정책 또는 행사와 사업 기회를 원문에서 확인합니다.",demo:false,live:true};
   }).filter(Boolean).slice(0,30);
   return response({ok:true,source:"문화체육관광부 RSS",updatedAt:new Date().toISOString(),count:items.length,items});
 }
@@ -179,11 +190,11 @@ function mapCustomRecord(row,index,name) {
   const link=pick("link","url","pblancUrl","bidNtceDtlUrl","detailUrl","originUrl","homepageUrl");
   const rawDate=pick("pubDate","start","startDate","registDe","creatPnttm","createdAt","ntceDt","bidNtceDt");
   const parsedDate=rawDate?new Date(rawDate):null;
-  const date=parsedDate&&!Number.isNaN(parsedDate.valueOf())?parsedDate.toISOString().slice(0,10):new Date().toISOString().slice(0,10);
+  const date=parsedDate&&!Number.isNaN(parsedDate.valueOf())?parsedDate.toISOString().slice(0,10):null;
   const period=pick("deadline","endDate","reqstDt","reqstBeginEndDe","rceptEndDt","bidClseDt","closeDate","applyEnd");
   const endMatch=period.match(/(20\d{2})[-./ ]?(\d{2})[-./ ]?(\d{2})/g)?.at(-1);
   const deadline=endMatch?dateOnly(endMatch):null;
-  return {id:`custom-${name}-${pick("id","seq","pblancId","eventInfoId")||index}`,title,org:pick("org","author","jrsdInsttNm","excInsttNm","agency","organNm")||name,source:name,field:pick("field","category","lcategory","supportField")||"공공사업",kind:pick("kind","type","eventType","businessType")||"지원·공모",deadline,start:date,budget:pick("budget","amount","supportBudget")||"공고 원문 확인",match:70,open:!deadline||new Date(deadline+"T23:59:59")>=new Date(),link:link.startsWith("https://")?link:"https://www.go.kr/",description:cleanHtml(pick("description","bsnsSumryCn","summary","content","contents","overview")),requirements:cleanHtml(pick("requirements","target","trgetNm","eligibility"))||"지원 자격·신청기간·제출 서류는 원문에서 확인하세요.",idea:"공고의 지원대상과 사업 목적을 검토한 뒤 당사 사업과 연결할 수 있는지 확인합니다.",demo:false,live:true};
+  return {id:`custom-${name}-${pick("id","seq","pblancId","eventInfoId")||index}`,title,org:pick("org","author","jrsdInsttNm","excInsttNm","agency","organNm")||name,source:name,field:pick("field","category","lcategory","supportField")||"공공사업",kind:pick("kind","type","eventType","businessType")||"지원·공모",deadline,start:date,budget:pick("budget","amount","supportBudget")||"공고 원문 확인",match:70,open:!deadline||new Date(deadline+"T23:59:59+09:00")>=new Date(),link:link.startsWith("https://")?link:"https://www.go.kr/",description:cleanHtml(pick("description","bsnsSumryCn","summary","content","contents","overview")),requirements:cleanHtml(pick("requirements","target","trgetNm","eligibility"))||"지원 자격·신청기간·제출 서류는 원문에서 확인하세요.",idea:"공고의 지원대상과 사업 목적을 검토한 뒤 당사 사업과 연결할 수 있는지 확인합니다.",demo:false,live:true};
 }
 function mapCustomXmlRecord(block,index,name) {
   const row={title:xmlBlockValue(block,["title","pblancNm","bidNtceNm","nttSj"]),link:xmlBlockValue(block,["link","url","pblancUrl","bidNtceDtlUrl"]),description:xmlBlockValue(block,["description","summary","bsnsSumryCn","content"]),pubDate:xmlBlockValue(block,["pubDate","registDe","createdAt","ntceDt"]),deadline:xmlBlockValue(block,["deadline","endDate","reqstDt","rceptEndDt"]),author:xmlBlockValue(block,["author","org","agency"]),category:xmlBlockValue(block,["category","lcategory"]),id:xmlBlockValue(block,["id","seq","pblancId"])};
