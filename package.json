@@ -5,6 +5,7 @@
   "scripts": {
     "build": "bash scripts/build.sh",
     "validate": "node scripts/validate-artifact.mjs",
-    "dev": "vercel dev"
+    "dev": "vercel dev",
+    "test": "npm run build && node --test tests/*.test.mjs"
   }
 }
