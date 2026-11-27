@@ -1,6 +1,6 @@
 # 검증 결과
 
-실행일 2026-11-26 · 환경: Claude Code 클라우드 컨테이너, Node 22 · 브랜치 `migration/claude-handoff`
+실행일 2026-11-26 · 갱신 2026-11-27 · 환경: Claude Code 클라우드 컨테이너, Node 22 · 브랜치 `migration/claude-handoff`
 
 | 항목 | 방법 | 기대 | 실제 | 결과 |
 |---|---|---|---|---|
@@ -23,7 +23,9 @@
 | 실패 시 이전 데이터 유지 | Playwright, 2회차 수집 실패 | 기존 2건 유지 + "이전 수집분" | 일치 | 통과 |
 | "마감일 미확인" 표시 | Playwright | 칩 표시 | 일치 | 통과 |
 
-fixture 테스트 14건 전부 통과 (`npm test`).
+| Vercel Preview 빌드 (11-27) | GitHub 커밋 상태 `6d93767` | 배포 성공 | success, "Deployment has completed" | 통과 |
+
+fixture 테스트 14건 전부 통과 (`npm test`). 11-27 재실행에서도 14/14 통과.
 
 ## 미실행
 
@@ -31,7 +33,6 @@ fixture 테스트 14건 전부 통과 (`npm test`).
 |---|---|
 | 출처별 실제 API 호출 | 이 컨테이너의 네트워크 정책이 `apis.data.go.kr`, `www.bizinfo.go.kr`를 차단(프록시 403). 실제 키도 없음 |
 | 실제 응답 형식 대조 | 위와 같음. 배열·객체 두 형식을 모두 처리하도록 했다 |
-| Vercel Preview 배포·로그 | Vercel 팀 권한 미승인 |
-| `icn1` 리전 적용 효과 | Preview 배포 후 기업마당 수집 결과로 확인 필요 |
-| GitHub push·PR | 이 세션에 저장소 쓰기 권한 미부여 |
+| Preview 화면·API 동작, Vercel 로그 | 배포는 성공. 화면 확인은 Michael 필요, 로그는 Vercel 팀 권한 미승인(11-27에도 403) |
+| `icn1` 리전 적용 효과 | 설정은 빌드 통과. 403 해소 여부는 Preview 수집 결과로 확인 필요 |
 | 관심 목록 재접속 복원 | localStorage 방식이라 같은 브라우저에서만 유지됨. 구조상 다른 기기 복원 불가 |
