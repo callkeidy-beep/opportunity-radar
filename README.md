@@ -25,6 +25,12 @@ npm run build
 npm run validate
 ```
 
+네트워크 없이 수집기 동작을 검사하려면:
+
+```bash
+npm test
+```
+
 ## GitHub와 Vercel 연결
 
 1. GitHub에 이 폴더의 파일을 새 저장소로 올립니다.
@@ -39,6 +45,7 @@ npm run validate
 | `CUSTOMS_SERVICE_KEY` | 관세청 품목별 국가별 수출입실적 API |
 | `BIZINFO_SUPPORT_KEY` | 기업마당 지원사업 피드 |
 | `BIZINFO_EVENT_KEY` | 기업마당 행사정보 피드 |
+| `DATA_GO_KR_SERVICE_KEY` | K-Startup 공고 · 과기정통부 사업공고 API |
 
 키를 등록한 뒤 다시 배포하면 공고 화면의 **새 공고 수집** 버튼이 서버 API를 호출합니다. 키가 없는 출처는 연결 실패로 표시됩니다. 문체부 공지·보도자료 RSS는 키 없이 서버에서 가져옵니다. 관세청 통계의 기본 국가는 미국(US)이며 필요하면 `/api/customs-trade?country=KR&hs=XXXX` 형식으로 국가와 HS 코드를 지정할 수 있습니다.
 
@@ -50,5 +57,8 @@ npm run validate
 - `GET /api/mcst-press-rss`
 - `GET /api/bizinfo/support`
 - `GET /api/bizinfo/events`
+- `GET /api/kstartup`
+- `GET /api/msit`
+- `POST /api/custom-source` (출처 관리에서 등록한 .go.kr API/RSS)
 
-응답 형식은 `{ "ok": true, "count": 0, "items": [] }`입니다. 지원자격·마감·예산은 원문에서 최종 확인해야 합니다.
+응답 형식은 `{ "ok": true, "count": 0, "items": [] }`입니다. 실패는 `ok:false`와 `error`, 외부 공급자 오류면 `layer:"upstream"`·`upstreamStatus`가 붙습니다. 지원자격·마감·예산은 원문에서 최종 확인해야 합니다.
